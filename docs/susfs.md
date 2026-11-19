@@ -46,16 +46,51 @@ When `configs/resukisu.config` contains `CONFIG_KSU_SUSFS=y`:
    `git apply --whitespace=nowarn`,
 3. after `olddefconfig` it re-verifies, and *fails the build* if
    `CONFIG_KSU_SUSFS` or any requested `CONFIG_KSU_SUSFS_*` feature was dropped,
-4. re-verifies the seven inline hook sites that ReSukiSU's
-   `tools/inline_hook_check.mk` greps for, so a silently-broken integration
-   cannot produce a kernel.
+4. re-verifies every inline hook site listed in ReSukiSU's
+   `tools/inline_hook_check.mk` — the list is parsed from that file rather than
+   hard-coded, so a ReSukiSU HEAD that starts requiring a new hook fails in
+   seconds instead of after the whole kernel has compiled,
+5. logs the `Image` build and, on failure, reprints the first `error:` /
+   `Error N` / `undefined reference` lines with five lines of context so the
+   real cause is not buried in the parallel compile output.
 
 `CONFIG_KSU_SUSFS` lives in the same Kconfig `choice` as
-`CONFIG_KSU_MANUAL_HOOK`, so the two are mutually exclusive; the SUSFS patch
-therefore widens the guard around the existing `op7.patch` hook sites to
-`#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)` and adds the
-three sites the manual path covered with auto hooks (`ksu_handle_setresuid`,
-`ksu_handle_sys_read`, `ksu_handle_input_handle_event`).
+`CONFIG_KSU_MANUAL_HOOK`, so the two are mutually exclusive. The SUSFS patch
+therefore widens the guard around the hook sites that are already type-correct
+in `op7.patch` (`ksu_handle_execveat`, `ksu_handle_sys_read`,
+`ksu_handle_setresuid`, `ksu_handle_sys_reboot`,
+`ksu_handle_input_handle_event`) to
+`#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)`, and adds the
+three sites the manual path used to cover with auto hooks.
+
+`ksu_handle_faccessat` and `ksu_handle_stat` are **not** widened: with
+`CONFIG_KSU_SUSFS` their prototypes in `feature/sucompat.c` are
+
+```c
+int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *unused);
+int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
+```
+
+and they dereference `(*filename)->name` and rewrite it in place to
+`/system/bin/sh`, so handing them the raw `const char __user **` that the
+syscall entry points carry would dereference user memory as a `struct
+filename`. The `op7.patch` hooks stay manual-only, and the SUSFS patch instead
+hooks `vfs_statx()` / `SYSCALL_DEFINE3(faccessat)` **after** `getname_flags()`:
+
+```
+ksu_filename = getname_flags(filename, lookup_flags, NULL);
+if (!susfs_is_current_proc_no_su() && !IS_ERR(ksu_filename) && ...)
+        ksu_handle_faccessat(&dfd, &ksu_filename, &mode, NULL);
+res = ksu_susfs_filename_lookup(dfd, ksu_filename, lookup_flags, &path);
+```
+
+`filename_lookup()` consumes the name (`putname()`) and is private to
+`fs/namei.c`, so the patch exposes the thin `ksu_susfs_filename_lookup()`
+wrapper; the sequence is otherwise identical to the `user_path_at()` it
+replaces. `ksu_handle_vfs_fstat()` is hooked in `vfs_statx_fd()` (which backs
+`fstat`/`newfstat`/`fstat64`/`statx` by fd) behind
+`ksu_is_init_rc_hook_enabled`, so the `init.rc` size spoof works in SUSFS mode
+too.
 
 ## Enabled / deferred feature set
 
@@ -118,5 +153,7 @@ git apply --check patches/op7.patch
 git apply --whitespace=nowarn --check patches/susfs-4.14.patch
 ```
 
-(`patches/susfs-4.14-ksu.patch` applies on top of both.)
+(`patches/susfs-4.14-ksu.patch` applies on top of both, and needs the four
+`fs/namei.c` / `include/linux/namei.h` / `fs/stat.c` / `fs/open.c` targets in
+the same state that `susfs-4.14.patch` leaves them in.)
 

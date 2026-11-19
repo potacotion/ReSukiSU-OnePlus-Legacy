@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from kernel_release import SUFFIX, branded_release
 from resukisu_source import resolve as resolve_resukisu
 from toolchain import configure, configure_legacy_linker
@@ -25,6 +26,83 @@ def checkout(repo, commit, dest, shallow=True):
     actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=dest, text=True).strip()
     if actual != commit:
         raise ValueError("Source commit mismatch")
+
+# The parallel compile buries the first failure under thousands of later lines,
+# so every make invocation that can fail is logged and summarised on failure.
+BUILD_ERROR = re.compile(r"error:|Error \d+|undefined reference|No rule to make target")
+
+
+def report_errors(log, context=5, limit=200):
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    hits = [index for index, line in enumerate(lines) if BUILD_ERROR.search(line)]
+    print("\n===== build error summary (" + str(log) + ") =====", flush=True)
+    if not hits:
+        print("No matching error line; see the log above.", flush=True)
+        print("===== end of build error summary =====", flush=True)
+        return
+    selected = []
+    covered = 0
+    for hit in hits:
+        selected.extend(range(max(hit - context, 0), min(hit + context + 1, len(lines))))
+        covered += 1
+        if len(selected) >= limit:
+            break
+    previous = -1
+    for number in dict.fromkeys(selected):
+        if number != previous + 1:
+            print("--", flush=True)
+        print("{:6d}: {}".format(number + 1, lines[number]), flush=True)
+        previous = number
+    if covered < len(hits):
+        print("... {} matching lines elided".format(len(hits) - covered), flush=True)
+    print("===== end of build error summary =====", flush=True)
+
+
+def run_logged(options, targets, env, log):
+    command = list(map(str, options)) + list(map(str, targets))
+    print("+", " ".join(command), flush=True)
+    with log.open("w", encoding="utf-8", errors="replace") as stream:
+        process = subprocess.Popen(command, env=env, text=True, errors="replace",
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        for line in process.stdout:
+            stream.write(line)
+            sys.stdout.write(line)
+        process.stdout.close()
+        code = process.wait()
+    if code != 0:
+        report_errors(log)
+        raise subprocess.CalledProcessError(code, command)
+
+# Kbuild records every inline hook ReSukiSU insists on in this file; the set
+# moves with ReSukiSU HEAD, so read it instead of hard-coding the list.
+INLINE_HOOK_RULE = re.compile(
+    r"\$\(eval \$\(call (check_ksu_hook|check_ksu_hook_incompatible),"
+    r"([A-Za-z0-9_]+),\$\(srctree\)/([^\s)]+)\)\)")
+
+
+def verify_inline_hooks(source):
+    """Reject a kernel tree whose inline hooks do not match ReSukiSU's rules."""
+    rules = source / "KernelSU/kernel/tools/inline_hook_check.mk"
+    if not rules.is_file():
+        raise RuntimeError("Missing ReSukiSU inline hook rules: " + str(rules))
+    wanted = {}
+    for kind, symbol, path in INLINE_HOOK_RULE.findall(rules.read_text(encoding="utf-8")):
+        wanted.setdefault((kind, path), []).append(symbol)
+    if not any(kind == "check_ksu_hook" for kind, _ in wanted):
+        raise RuntimeError("Could not parse the ReSukiSU inline hook rules")
+    for (kind, path), symbols in sorted(wanted.items()):
+        target = source / path
+        if not target.is_file():
+            raise RuntimeError("SUSFS inline hook target is missing: " + path)
+        text = target.read_text(encoding="utf-8", errors="replace")
+        for symbol in symbols:
+            present = re.search(r"\b" + symbol + r"\b", text) is not None
+            if kind == "check_ksu_hook" and not present:
+                raise RuntimeError("Missing SUSFS inline hook: " + symbol + " in " + path)
+            if kind == "check_ksu_hook_incompatible" and present:
+                raise RuntimeError("Incompatible SUSFS inline hook: " + symbol + " in " + path)
+    return sorted({symbol for symbols in wanted.values() for symbol in symbols})
+
 
 def build(name, config=None, rom='coloros', diagnostics_only=False):
     if os.name != "posix":
@@ -207,6 +285,7 @@ def build(name, config=None, rom='coloros', diagnostics_only=False):
         if "CONFIG_TOUCHPANEL_NT_PEN_SUPPORT=y" in final_config.splitlines():
             raise RuntimeError("Unexpected non-stock stylus support enabled")
     required = ["CONFIG_KSU=y", "CONFIG_KALLSYMS_ALL=y", "CONFIG_MODVERSIONS=y"]
+    susfs_hooks = []
     if susfs_wanted:
         # CONFIG_KSU_SUSFS replaces CONFIG_KSU_MANUAL_HOOK in ReSukiSU's hook
         # method choice, so only one of the two can survive olddefconfig.
@@ -224,11 +303,13 @@ def build(name, config=None, rom='coloros', diagnostics_only=False):
                 ("fs/open.c", "ksu_handle_faccessat"),
                 ("fs/read_write.c", "ksu_handle_sys_read"),
                 ("fs/stat.c", "ksu_handle_stat"),
+                ("fs/stat.c", "ksu_handle_vfs_fstat"),
                 ("kernel/reboot.c", "ksu_handle_sys_reboot"),
                 ("drivers/input/input.c", "ksu_handle_input_handle_event")):
             # Mirrors the fail-fast checks in ReSukiSU's tools/inline_hook_check.mk.
-            if symbol not in (source / path).read_text(encoding="utf-8", errors="replace"):
+            if not re.search(r"\b" + symbol + r"\b", (source / path).read_text(encoding="utf-8", errors="replace")):
                 raise RuntimeError("Missing SUSFS inline hook: " + symbol + " in " + path)
+        susfs_hooks = verify_inline_hooks(source)
         for path in ("fs/susfs.c", "include/linux/susfs.h", "include/linux/susfs_def.h"):
             if not (source / path).is_file():
                 raise RuntimeError("SUSFS source missing from kernel tree: " + path)
@@ -310,7 +391,7 @@ def build(name, config=None, rom='coloros', diagnostics_only=False):
         shutil.copyfile(modules / "vendor/oplus/kernel/network/data_module/proto-src/netlink_msg.pb-c.h", dest / "netlink_msg.pb-c.h")
         print("ABI type diagnostics only; no kernel image produced.")
         return
-    run(*options, "-j" + str(os.cpu_count() or 2), "Image", env=env)
+    run_logged(options, ["-j" + str(os.cpu_count() or 2), "Image"], env, work / "image-build.log")
     actual_release = (output / "include/config/kernel.release").read_text().strip()
     if actual_release != release:
         raise ValueError("Compiled kernel release differs from the requested daxiaamu release")
@@ -338,6 +419,7 @@ def build(name, config=None, rom='coloros', diagnostics_only=False):
     save(dest / "build.json", {"device": name, "os": rom, "firmware": firmware["build_id"], "kernel_release": actual_release, "stock_kernel_release": stock_release, "kernel_release_suffix": SUFFIX, "kernel": data["kernel"], "resukisu": data["resukisu"], "resukisu_selection": resukisu_selection,
         "compat_patch_sha256": sha256(compat_patch) if compat_patch.exists() else None, "stock_abi_header_sha256": sha256(stock_abi_header) if stock_abi_header else None, "vendor_patch_sha256": sha256(vendor_patch) if vendor_patch.exists() else None, "vendor": data["vendor"], "patch_sha256": sha256(patch), "image_sha256": sha256(image), "compiler": compiler, "compiler_lock": compiler_lock, "stock_protocol": protocol, "linker": subprocess.check_output([linker, "--version"], text=True).splitlines()[0], "native_features": native_features,
         "module_trust": module_trust, "config_sha256": sha256(output / ".config"), "stock_config_supplied": stock_config, "config_translations": translations,
+        "susfs_inline_hooks": susfs_hooks,
         "linker_lock": linker_lock, "github_actions": actions, "compile_verified": True, "device_verified": False})
     verify_embedded(firmware, dest)
     print("Compile complete; boot packaging and on-device checks remain.")

@@ -36,27 +36,92 @@ diff --git a/fs/exec.c b/fs/exec.c
  	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
  #endif
  	if (IS_ERR(filename))
+diff --git a/fs/namei.c b/fs/namei.c
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -2588,6 +2588,20 @@ static int filename_lookup(int dfd, struct filename *name, unsigned flags,
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU_SUSFS
++/*
++ * KernelSU's SUSFS (susfs_inline) sucompat handlers rewrite the name inside a
++ * struct filename, so fs/open.c and fs/stat.c have to resolve a name they
++ * obtained themselves. filename_lookup() is private to this file and owns the
++ * putname(), so expose it as a drop-in replacement for user_path_at().
++ */
++int ksu_susfs_filename_lookup(int dfd, struct filename *name, unsigned flags,
++			      struct path *path)
++{
++	return filename_lookup(dfd, name, flags, path, NULL);
++}
++#endif
++
+ /* Returns 0 and nd will be valid on success; Retuns error, otherwise. */
+ static int path_parentat(struct nameidata *nd, unsigned flags,
+ 				struct path *parent)
 diff --git a/fs/open.c b/fs/open.c
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -361,7 +361,7 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
-  */
- SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+@@ -31,6 +31,11 @@
+ #include <linux/ima.h>
+ #include <linux/dnotify.h>
+ #include <linux/compat.h>
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/jump_label.h>
++#include <linux/sched.h>
++#include <linux/susfs_def.h>
++#endif
+ 
+ #include "internal.h"
+ 
+@@ -363,6 +368,11 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
  {
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ #ifdef CONFIG_KSU_MANUAL_HOOK
  extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
++#endif
++#ifdef CONFIG_KSU_SUSFS
++extern int ksu_handle_faccessat(int *, struct filename **, int *, int *);
++extern struct static_key_true ksu_su_compat_enabled;
++extern bool __ksu_is_allow_uid_for_current(uid_t uid);
  #endif
  	const struct cred *old_cred;
-@@ -372,7 +372,7 @@ extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
+ 	struct cred *override_cred;
+@@ -371,6 +381,9 @@ extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
+ 	struct vfsmount *mnt;
  	int res;
  	unsigned int lookup_flags = LOOKUP_FOLLOW;
++#ifdef CONFIG_KSU_SUSFS
++	struct filename *ksu_filename;
++#endif
  
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ #ifdef CONFIG_KSU_MANUAL_HOOK
  	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
- #endif
- 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
+@@ -416,7 +429,24 @@ extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
+ 
+ 	old_cred = override_creds(override_cred);
+ retry:
++#ifdef CONFIG_KSU_SUSFS
++	/*
++	 * The SUSFS build of KernelSU's sucompat handler rewrites the resolved
++	 * name of a struct filename in place, so it has to run after
++	 * getname_flags() materialised one. Handing it the raw user pointer
++	 * would make it read user memory as a kernel structure and crash.
++	 * filename_lookup() consumes (putname()) the name it is given, which
++	 * makes this sequence identical to user_path_at() otherwise.
++	 */
++	ksu_filename = getname_flags(filename, lookup_flags, NULL);
++	if (!susfs_is_current_proc_no_su() && !IS_ERR(ksu_filename) &&
++	    static_branch_likely(&ksu_su_compat_enabled) &&
++	    unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))
++		ksu_handle_faccessat(&dfd, &ksu_filename, &mode, NULL);
++	res = ksu_susfs_filename_lookup(dfd, ksu_filename, lookup_flags, &path);
++#else
+ 	res = user_path_at(dfd, filename, lookup_flags, &path);
++#endif
+ 	if (res)
+ 		goto out;
+ 
 diff --git a/fs/read_write.c b/fs/read_write.c
 --- a/fs/read_write.c
 +++ b/fs/read_write.c
@@ -77,74 +142,90 @@ diff --git a/fs/read_write.c b/fs/read_write.c
 diff --git a/fs/stat.c b/fs/stat.c
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -378,13 +378,13 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
- SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
- 		struct stat __user *, statbuf, int, flag)
- {
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
- extern int ksu_handle_stat(int *, const char __user **, int *);
+@@ -18,10 +18,25 @@
+ #include <linux/pagemap.h>
+ #include <linux/compat.h>
+ #ifdef CONFIG_KSU_SUSFS
++#include <linux/jump_label.h>
+ #include <linux/susfs_def.h>
+ #include <linux/version.h>
  #endif
- 	struct kstat stat;
- 	int error;
  
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
- 	ksu_handle_stat(&dfd, &filename, &flag);
- #endif
- 	error = vfs_fstatat(dfd, filename, &stat, flag);
-@@ -396,7 +396,7 @@ extern int ksu_handle_stat(int *, const char __user **, int *);
++#ifdef CONFIG_KSU_SUSFS
++/*
++ * Inline hooks required by KernelSU's SUSFS (susfs_inline) build. Both
++ * sucompat handlers take a struct filename, so they must run between
++ * getname_flags() and the lookup: the raw user pointer would be dereferenced
++ * as a kernel structure.
++ */
++extern struct static_key_true ksu_is_init_rc_hook_enabled;
++extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);
++extern struct static_key_true ksu_su_compat_enabled;
++extern bool __ksu_is_allow_uid_for_current(uid_t uid);
++extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
++#endif
++
+ #include <linux/uaccess.h>
+ #include <asm/unistd.h>
  
- SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
- {
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
- extern void ksu_handle_newfstat_ret(unsigned int *, struct stat __user **);
- #endif
- 	struct kstat stat;
-@@ -405,7 +405,7 @@ extern void ksu_handle_newfstat_ret(unsigned int *, struct stat __user **);
- 	if (!error)
- 		error = cp_new_stat(&stat, statbuf);
- 
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
- 	ksu_handle_newfstat_ret(&fd, &statbuf);
- #endif
+@@ -162,6 +177,11 @@ int vfs_statx_fd(unsigned int fd, struct kstat *stat,
+ 	if (f.file) {
+ 		error = vfs_getattr(&f.file->f_path, stat,
+ 				    request_mask, query_flags);
++#ifdef CONFIG_KSU_SUSFS
++		if (!error &&
++		    static_branch_unlikely(&ksu_is_init_rc_hook_enabled))
++			ksu_handle_vfs_fstat(fd, &stat->size);
++#endif
+ 		fdput(f);
+ 	}
  	return error;
-@@ -522,7 +522,7 @@ SYSCALL_DEFINE2(lstat64, const char __user *, filename,
+@@ -189,6 +209,9 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
+ 	struct path path;
+ 	int error = -EINVAL;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
++#ifdef CONFIG_KSU_SUSFS
++	struct filename *ksu_filename;
++#endif
  
- SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+ 	if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
+ 		       AT_EMPTY_PATH | KSTAT_QUERY_FLAGS)) != 0)
+@@ -202,7 +225,19 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
+ 		lookup_flags |= LOOKUP_EMPTY;
+ 
+ retry:
++#ifdef CONFIG_KSU_SUSFS
++	/* Same ordering as faccessat: the sucompat stat handler rewrites
++	 * (*filename)->name in place, so it needs the struct filename that the
++	 * upcoming lookup will consume. */
++	ksu_filename = getname_flags(filename, lookup_flags, NULL);
++	if (!susfs_is_current_proc_no_su() && !IS_ERR(ksu_filename) &&
++	    static_branch_likely(&ksu_su_compat_enabled) &&
++	    unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))
++		ksu_handle_stat(&dfd, &ksu_filename, &flags);
++	error = ksu_susfs_filename_lookup(dfd, ksu_filename, lookup_flags, &path);
++#else
+ 	error = user_path_at(dfd, filename, lookup_flags, &path);
++#endif
+ 	if (error)
+ 		goto out;
+ 
+diff --git a/include/linux/namei.h b/include/linux/namei.h
+--- a/include/linux/namei.h
++++ b/include/linux/namei.h
+@@ -51,6 +51,12 @@ extern int path_pts(struct path *path);
+ 
+ extern int user_path_at_empty(int, const char __user *, unsigned, struct path *, int *empty);
+ 
++#ifdef CONFIG_KSU_SUSFS
++struct filename;
++extern int ksu_susfs_filename_lookup(int dfd, struct filename *name,
++				     unsigned flags, struct path *path);
++#endif
++
+ static inline int user_path_at(int dfd, const char __user *name, unsigned flags,
+ 		 struct path *path)
  {
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
- extern void ksu_handle_fstat64_ret(unsigned long *, struct stat64 __user **);
- #endif
- 	struct kstat stat;
-@@ -531,7 +531,7 @@ extern void ksu_handle_fstat64_ret(unsigned long *, struct stat64 __user **);
- 	if (!error)
- 		error = cp_new_stat64(&stat, statbuf);
- 
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
- 	ksu_handle_fstat64_ret(&fd, &statbuf);
- #endif
- 	return error;
-@@ -540,13 +540,13 @@ extern void ksu_handle_fstat64_ret(unsigned long *, struct stat64 __user **);
- SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
- 		struct stat64 __user *, statbuf, int, flag)
- {
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
- extern int ksu_handle_stat(int *, const char __user **, int *);
- #endif
- 	struct kstat stat;
- 	int error;
- 
--#ifdef CONFIG_KSU_MANUAL_HOOK
-+#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
- 	ksu_handle_stat(&dfd, &filename, &flag);
- #endif
- 	error = vfs_fstatat(dfd, filename, &stat, flag);
 diff --git a/kernel/reboot.c b/kernel/reboot.c
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
