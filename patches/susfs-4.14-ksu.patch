@@ -7,8 +7,8 @@ diff --git a/drivers/input/input.c b/drivers/input/input.c
  
 +#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
 +	{
-+		extern {decl};
-+		{call};
++		extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
++		ksu_handle_input_handle_event(&type, &code, &value);
 +	}
 +#endif
 +
@@ -67,8 +67,8 @@ diff --git a/fs/read_write.c b/fs/read_write.c
 +
 +#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
 +	{
-+		extern {decl};
-+		{call};
++		extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);
++		ksu_handle_sys_read(fd, &buf, &count);
 +	}
 +#endif
  #if defined(OPLUS_FEATURE_IOMONITOR) && defined(CONFIG_IOMONITOR)
@@ -174,8 +174,8 @@ diff --git a/kernel/sys.c b/kernel/sys.c
  
 +#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
 +	{
-+		extern {decl};
-+		{call};
++		extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
++		ksu_handle_setresuid(ruid, euid, suid);
 +	}
 +#endif
 +
