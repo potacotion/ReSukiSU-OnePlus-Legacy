@@ -1,0 +1,51 @@
+drivers/staging/android/ion: fix use-before-init in the deferred
+free list drain (kswapd NULL deref in ion_heap_shrink_scan)
+
+OPLUS added a task_struct memleak-accounting block to
+_ion_heap_freelist_drain() above the loop that assigns `buffer`, i.e.
+it dereferences an uninitialized pointer.  clang-14 propagates the
+poison into the arm64 LL/SC atomics and emits a put_task_struct()
+sequence whose address register is never loaded, so any shrinker run
+with a non-empty DEFER_FREE freelist panics kswapd0.
+
+Drop the block: it is a duplicate of the accounting ion_buffer_destroy()
+already performs for every buffer drained here, so removing it also
+avoids a double put_task_struct().  No exported symbol, data layout or
+ABI CRC changes.
+
+---
+--- a/drivers/staging/android/ion/ion_heap.c
++++ b/drivers/staging/android/ion/ion_heap.c
+@@ -193,13 +193,25 @@
+ 	if (ion_heap_freelist_size(heap) == 0)
+ 		return 0;
+ 
+-#if defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_DUMP_TASKS_MEM)
+-	if (buffer->tsk) {
+-		atomic64_sub(buffer->size, &buffer->tsk->ions);
+-		put_task_struct(buffer->tsk);
+-		buffer->tsk = NULL;
+-	}
+-#endif
++	/*
++	 * Do not touch buffer->tsk here: the loop below is what assigns
++	 * "buffer", so at this point the pointer is uninitialized.  Reading it
++	 * is undefined behaviour, and clang-14 propagates the poison straight
++	 * into the LL/SC atomic templates of put_task_struct():
++	 *
++	 *   prfm pstl1strm, [x8]; ldxr x8, [x8]; sub x8, x8, x8;
++	 *   stxr w9, x8, [x8]; ...; bl __put_task_struct
++	 *
++	 * x8 is never loaded from anything, so it holds a stale caller-saved
++	 * value (0 after _raw_spin_unlock) and kswapd dies in
++	 * ion_heap_shrink_scan with "Unable to handle kernel NULL pointer
++	 * dereference at virtual address 00000000".
++	 *
++	 * The accounting is not needed here either: ion_buffer_destroy() below
++	 * already subtracts buffer->size from buffer->tsk->ions, drops the
++	 * task_struct reference and clears buffer->tsk for every buffer this
++	 * loop drains.  Keeping the block would double put_task_struct().
++	 */
+ 	spin_lock(&heap->free_lock);
+ 	if (size == 0)
+ 		size = heap->free_list_size;

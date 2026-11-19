@@ -104,6 +104,41 @@ def verify_inline_hooks(source):
     return sorted({symbol for symbols in wanted.values() for symbol in symbols})
 
 
+ION_HEAP = "drivers/staging/android/ion/ion_heap.c"
+ION_UB_PATCH = "oplus-ion-shrinker-ub.patch"
+
+
+def fix_oplus_ion_ub(source):
+    """Drop OPLUS's use-before-init block in _ion_heap_freelist_drain().
+
+    The stock sources read buffer->tsk before the drain loop assigns `buffer`.
+    clang-14 propagates the poisoned value into the arm64 LL/SC atomics of
+    put_task_struct() and emits
+
+        prfm pstl1strm, [x8]; ldxr x8, [x8]; sub x8, x8, x8;
+        stxr w9, x8, [x8]; ...; bl __put_task_struct
+
+    where x8 is never loaded from anything. kswapd then dies with
+    "NULL pointer dereference at virtual address 00000000" in
+    ion_heap_shrink_scan+0x8c as soon as the DEFER_FREE freelist is non-empty.
+    ion_buffer_destroy() already does that accounting for every drained buffer,
+    so the block is removed instead of relocated (relocating would double
+    put_task_struct()). Returns the patch checksum, or None when not needed.
+    """
+    target = source / ION_HEAP
+    patch = ROOT / "patches" / ION_UB_PATCH
+    if not target.is_file() or "buffer->tsk" not in target.read_text(encoding="utf-8", errors="replace"):
+        return None
+    if not patch.is_file():
+        raise RuntimeError("Missing OPLUS ion shrinker fix: " + patch.name)
+    run("git", "apply", "--check", patch, cwd=source)
+    run("git", "apply", patch, cwd=source)
+    if "buffer->tsk" in (source / ION_HEAP).read_text(encoding="utf-8", errors="replace"):
+        raise RuntimeError("OPLUS ion shrinker use-before-init fix did not apply")
+    print("Applied " + patch.name + " (kswapd ion_heap_shrink_scan NULL deref)", flush=True)
+    return sha256(patch)
+
+
 def build(name, config=None, rom='coloros', diagnostics_only=False):
     if os.name != "posix":
         raise RuntimeError("Build on Linux (GitHub Actions or WSL)")
@@ -163,6 +198,7 @@ def build(name, config=None, rom='coloros', diagnostics_only=False):
     if compat_patch.exists():
         run("git", "apply", "--check", compat_patch, cwd=source)
         run("git", "apply", compat_patch, cwd=source)
+    ion_fix = fix_oplus_ion_ub(source)
     # SUSFS is only integrated when the Kconfig fragment asks for it, so the
     # stock hook path stays byte-identical for every other configuration.
     susfs_fragment = (ROOT / "configs/resukisu.config").read_text(encoding="utf-8")
@@ -417,7 +453,7 @@ def build(name, config=None, rom='coloros', diagnostics_only=False):
             ("commit", "GITHUB_SHA"))}
         actions["url"] = "https://github.com/" + actions["repository"] + "/actions/runs/" + actions["run_id"]
     save(dest / "build.json", {"device": name, "os": rom, "firmware": firmware["build_id"], "kernel_release": actual_release, "stock_kernel_release": stock_release, "kernel_release_suffix": SUFFIX, "kernel": data["kernel"], "resukisu": data["resukisu"], "resukisu_selection": resukisu_selection,
-        "compat_patch_sha256": sha256(compat_patch) if compat_patch.exists() else None, "stock_abi_header_sha256": sha256(stock_abi_header) if stock_abi_header else None, "vendor_patch_sha256": sha256(vendor_patch) if vendor_patch.exists() else None, "vendor": data["vendor"], "patch_sha256": sha256(patch), "image_sha256": sha256(image), "compiler": compiler, "compiler_lock": compiler_lock, "stock_protocol": protocol, "linker": subprocess.check_output([linker, "--version"], text=True).splitlines()[0], "native_features": native_features,
+        "compat_patch_sha256": sha256(compat_patch) if compat_patch.exists() else None, "oplus_ion_ub_fix_sha256": ion_fix, "stock_abi_header_sha256": sha256(stock_abi_header) if stock_abi_header else None, "vendor_patch_sha256": sha256(vendor_patch) if vendor_patch.exists() else None, "vendor": data["vendor"], "patch_sha256": sha256(patch), "image_sha256": sha256(image), "compiler": compiler, "compiler_lock": compiler_lock, "stock_protocol": protocol, "linker": subprocess.check_output([linker, "--version"], text=True).splitlines()[0], "native_features": native_features,
         "module_trust": module_trust, "config_sha256": sha256(output / ".config"), "stock_config_supplied": stock_config, "config_translations": translations,
         "susfs_inline_hooks": susfs_hooks,
         "linker_lock": linker_lock, "github_actions": actions, "compile_verified": True, "device_verified": False})

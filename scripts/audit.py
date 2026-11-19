@@ -31,6 +31,10 @@ def audit(name):
                 raise ValueError("Patch differs from reviewed hooks: " + path)
     vendor_patch = ROOT / "patches" / ("vendor-" + {"oneplus-7-pro": "oneplus-7", "oneplus-7t": "oneplus-7", "oneplus-7t-pro": "oneplus-7", "oneplus-8-pro": "oneplus-8", "oneplus-9-pro": "oneplus-9"}.get(name, name) + ".patch")
     additional = [(vendor_patch, data["vendor"]), (ROOT / "patches" / ("compat-" + data["platform"] + ".patch"), data["kernel"])]
+    ion_patch = ROOT / "patches" / "oplus-ion-shrinker-ub.patch"
+    if data["platform"] == "sm8150" and ion_patch.exists():
+        # The OPLUS use-before-init only exists in the sm8150 ion_heap.c.
+        additional.append((ion_patch, data["kernel"]))
     for extra_patch, origin in additional:
         if not extra_patch.exists():
             continue
