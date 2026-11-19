@@ -106,6 +106,9 @@ def verify_inline_hooks(source):
 
 ION_HEAP = "drivers/staging/android/ion/ion_heap.c"
 ION_UB_PATCH = "oplus-ion-shrinker-ub.patch"
+# The stray block in _ion_heap_freelist_drain(); its presence means the tree
+# still dereferences `buffer` four lines before the loop assigns it.
+ION_UB_LINE = "atomic64_sub(buffer->size, &buffer->tsk->ions);"
 
 
 def fix_oplus_ion_ub(source):
@@ -127,13 +130,14 @@ def fix_oplus_ion_ub(source):
     """
     target = source / ION_HEAP
     patch = ROOT / "patches" / ION_UB_PATCH
-    if not target.is_file() or "buffer->tsk" not in target.read_text(encoding="utf-8", errors="replace"):
+    if not target.is_file() or ION_UB_LINE not in target.read_text(encoding="utf-8", errors="replace"):
         return None
     if not patch.is_file():
         raise RuntimeError("Missing OPLUS ion shrinker fix: " + patch.name)
     run("git", "apply", "--check", patch, cwd=source)
     run("git", "apply", patch, cwd=source)
-    if "buffer->tsk" in (source / ION_HEAP).read_text(encoding="utf-8", errors="replace"):
+    # The replacement comment names buffer->tsk, so match the statement itself.
+    if ION_UB_LINE in (source / ION_HEAP).read_text(encoding="utf-8", errors="replace"):
         raise RuntimeError("OPLUS ion shrinker use-before-init fix did not apply")
     print("Applied " + patch.name + " (kswapd ion_heap_shrink_scan NULL deref)", flush=True)
     return sha256(patch)
