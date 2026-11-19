@@ -85,6 +85,23 @@ def build(name, config=None, rom='coloros', diagnostics_only=False):
     if compat_patch.exists():
         run("git", "apply", "--check", compat_patch, cwd=source)
         run("git", "apply", compat_patch, cwd=source)
+    # SUSFS is only integrated when the Kconfig fragment asks for it, so the
+    # stock hook path stays byte-identical for every other configuration.
+    susfs_fragment = (ROOT / "configs/resukisu.config").read_text(encoding="utf-8")
+    susfs_wanted = "CONFIG_KSU_SUSFS=y" in susfs_fragment.splitlines()
+    susfs_patches = [ROOT / "patches" / item for item in ("susfs-4.14.patch", "susfs-4.14-ksu.patch")]
+    if susfs_wanted:
+        # The SUSFS sources are vendored instead of fetched at build time so the
+        # tree_hash stays reproducible; provenance is recorded in docs/susfs.md.
+        for item in ("fs/susfs.c", "include/linux/susfs.h", "include/linux/susfs_def.h"):
+            shutil.copyfile(ROOT / "susfs" / item, source / item)
+        for item in susfs_patches:
+            if not item.is_file():
+                raise RuntimeError("Missing SUSFS patch: " + item.name)
+            # The vendored 4.14 port carries upstream indentation that trips the
+            # default whitespace gate.
+            run("git", "apply", "--whitespace=nowarn", "--check", item, cwd=source)
+            run("git", "apply", "--whitespace=nowarn", item, cwd=source)
     checkout(data["resukisu"]["repository"], data["resukisu"]["commit"], source / "KernelSU", False)
     (source / "drivers/kernelsu").symlink_to("../KernelSU/kernel", target_is_directory=True)
     for path, addition in (
@@ -189,9 +206,37 @@ def build(name, config=None, rom='coloros', diagnostics_only=False):
                 raise RuntimeError("Kconfig changed stock option: " + new)
         if "CONFIG_TOUCHPANEL_NT_PEN_SUPPORT=y" in final_config.splitlines():
             raise RuntimeError("Unexpected non-stock stylus support enabled")
-    for required in ("CONFIG_KSU=y", "CONFIG_KSU_MANUAL_HOOK=y", "CONFIG_KALLSYMS_ALL=y", "CONFIG_MODVERSIONS=y"):
-        if required not in final_config.splitlines():
-            raise RuntimeError("Kconfig dropped required option: " + required)
+    required = ["CONFIG_KSU=y", "CONFIG_KALLSYMS_ALL=y", "CONFIG_MODVERSIONS=y"]
+    if susfs_wanted:
+        # CONFIG_KSU_SUSFS replaces CONFIG_KSU_MANUAL_HOOK in ReSukiSU's hook
+        # method choice, so only one of the two can survive olddefconfig.
+        required += ["CONFIG_KSU_SUSFS=y"]
+        if "CONFIG_KSU_MANUAL_HOOK=y" in final_config.splitlines():
+            raise RuntimeError("SUSFS and the manual hook method are mutually exclusive")
+        for feature in ("CONFIG_KSU_SUSFS_SUS_PATH", "CONFIG_KSU_SUSFS_SUS_KSTAT",
+                        "CONFIG_KSU_SUSFS_SPOOF_UNAME", "CONFIG_KSU_SUSFS_ENABLE_LOG",
+                        "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG"):
+            if feature + "=y" not in final_config.splitlines():
+                raise RuntimeError("Kconfig dropped required SUSFS option: " + feature)
+        for path, symbol in (
+                ("kernel/sys.c", "ksu_handle_setresuid"),
+                ("fs/exec.c", "ksu_handle_execveat"),
+                ("fs/open.c", "ksu_handle_faccessat"),
+                ("fs/read_write.c", "ksu_handle_sys_read"),
+                ("fs/stat.c", "ksu_handle_stat"),
+                ("kernel/reboot.c", "ksu_handle_sys_reboot"),
+                ("drivers/input/input.c", "ksu_handle_input_handle_event")):
+            # Mirrors the fail-fast checks in ReSukiSU's tools/inline_hook_check.mk.
+            if symbol not in (source / path).read_text(encoding="utf-8", errors="replace"):
+                raise RuntimeError("Missing SUSFS inline hook: " + symbol + " in " + path)
+        for path in ("fs/susfs.c", "include/linux/susfs.h", "include/linux/susfs_def.h"):
+            if not (source / path).is_file():
+                raise RuntimeError("SUSFS source missing from kernel tree: " + path)
+    else:
+        required += ["CONFIG_KSU_MANUAL_HOOK=y"]
+    for required_option in required:
+        if required_option not in final_config.splitlines():
+            raise RuntimeError("Kconfig dropped required option: " + required_option)
     if data["platform"] == "sm8150" and diagnostics_only:
         # Use the exporting translation units: a declaration in another .i file
         # may see incomplete types and produce a different genksyms graph.

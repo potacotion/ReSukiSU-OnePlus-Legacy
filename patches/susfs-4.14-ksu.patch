@@ -1,0 +1,184 @@
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -439,6 +439,13 @@ void input_event(struct input_dev *dev,
+ {
+ 	unsigned long flags;
+ 
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
++	{
++		extern {decl};
++		{call};
++	}
++#endif
++
+ 	if (is_event_supported(type, dev->evbit, EV_MAX)) {
+ 
+ 		spin_lock_irqsave(&dev->event_lock, flags);
+diff --git a/fs/exec.c b/fs/exec.c
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1705,7 +1705,7 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 			      struct user_arg_ptr envp,
+ 			      int flags)
+ {
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ extern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);
+ #endif
+ 	char *pathbuf = NULL;
+@@ -1714,7 +1714,7 @@ extern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *)
+ 	struct files_struct *displaced;
+ 	int retval;
+ 
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ 	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+ #endif
+ 	if (IS_ERR(filename))
+diff --git a/fs/open.c b/fs/open.c
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -361,7 +361,7 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
+  */
+ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
+ #endif
+ 	const struct cred *old_cred;
+@@ -372,7 +372,7 @@ extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
+ 	int res;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW;
+ 
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ 	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+ #endif
+ 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
+diff --git a/fs/read_write.c b/fs/read_write.c
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -587,6 +587,13 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
+ 	struct fd f = fdget_pos(fd);
+ 	ssize_t ret = -EBADF;
++
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
++	{
++		extern {decl};
++		{call};
++	}
++#endif
+ #if defined(OPLUS_FEATURE_IOMONITOR) && defined(CONFIG_IOMONITOR)
+ 	unsigned long read_time = jiffies;
+ #endif /*OPLUS_FEATURE_IOMONITOR*/
+diff --git a/fs/stat.c b/fs/stat.c
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -378,13 +378,13 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+ {
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ extern int ksu_handle_stat(int *, const char __user **, int *);
+ #endif
+ 	struct kstat stat;
+ 	int error;
+ 
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ 	ksu_handle_stat(&dfd, &filename, &flag);
+ #endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+@@ -396,7 +396,7 @@ extern int ksu_handle_stat(int *, const char __user **, int *);
+ 
+ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ {
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ extern void ksu_handle_newfstat_ret(unsigned int *, struct stat __user **);
+ #endif
+ 	struct kstat stat;
+@@ -405,7 +405,7 @@ extern void ksu_handle_newfstat_ret(unsigned int *, struct stat __user **);
+ 	if (!error)
+ 		error = cp_new_stat(&stat, statbuf);
+ 
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ 	ksu_handle_newfstat_ret(&fd, &statbuf);
+ #endif
+ 	return error;
+@@ -522,7 +522,7 @@ SYSCALL_DEFINE2(lstat64, const char __user *, filename,
+ 
+ SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+ {
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ extern void ksu_handle_fstat64_ret(unsigned long *, struct stat64 __user **);
+ #endif
+ 	struct kstat stat;
+@@ -531,7 +531,7 @@ extern void ksu_handle_fstat64_ret(unsigned long *, struct stat64 __user **);
+ 	if (!error)
+ 		error = cp_new_stat64(&stat, statbuf);
+ 
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ 	ksu_handle_fstat64_ret(&fd, &statbuf);
+ #endif
+ 	return error;
+@@ -540,13 +540,13 @@ extern void ksu_handle_fstat64_ret(unsigned long *, struct stat64 __user **);
+ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 		struct stat64 __user *, statbuf, int, flag)
+ {
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ extern int ksu_handle_stat(int *, const char __user **, int *);
+ #endif
+ 	struct kstat stat;
+ 	int error;
+ 
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ 	ksu_handle_stat(&dfd, &filename, &flag);
+ #endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -280,14 +280,14 @@ static DEFINE_MUTEX(reboot_mutex);
+ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 		void __user *, arg)
+ {
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ extern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);
+ #endif
+ 	struct pid_namespace *pid_ns = task_active_pid_ns(current);
+ 	char buffer[256];
+ 	int ret = 0;
+ 
+-#ifdef CONFIG_KSU_MANUAL_HOOK
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
+ 	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+ #endif
+ 	/* We only trust the superuser with rebooting the system. */
+diff --git a/kernel/sys.c b/kernel/sys.c
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -603,6 +603,13 @@ SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)
+ 	int retval;
+ 	kuid_t kruid, keuid, ksuid;
+ 
++#if defined(CONFIG_KSU_MANUAL_HOOK) || defined(CONFIG_KSU_SUSFS)
++	{
++		extern {decl};
++		{call};
++	}
++#endif
++
+ 	kruid = make_kuid(ns, ruid);
+ 	keuid = make_kuid(ns, euid);
+ 	ksuid = make_kuid(ns, suid);
